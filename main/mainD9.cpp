@@ -14,18 +14,19 @@ enum Mission {
   SOUTH
 } mission;
 
-// Left motor: IN1=7, IN2=8, EN=5
-// Right motor: IN1=7, IN2=8, EN=6
-// IR sensors: left=A4, right=A5, lora communication: TX=2, RX=3
-// Sonic sensor: TRIG=13, ECHO=12, IR receiver: 4
-// The threshold for line detection is set to 200 (for analog sensors).
+// Left motor: IN1=8, IN2=7, EN=6 (7 and 8 swapped in code so positive speed drives forward)
+// Right motor: IN1=8, IN2=7, EN=5
+// IR sensors: left=A5, right=A4, LoRa: module TXD -> D2, module RXD <- D10
+// No ultrasonic sensor on the D9, IR receiver: 4
+// Servos: radar D3, front lever D9, tow D11 (lever and tow have no code yet)
+// The threshold for line detection is set to 300 (for analog sensors).
 
 GenericPlatform basePlatform(
-  7, 8, 6, //Left motor
-  7, 8, 5, //Right motor
-  A5, A4, 9, 10, //Ir analog and Lora
-  13, 12, 4, //Ultrasonic and IR receiver
-  300 , "NAG" //Threshold and name
+  8, 7, 6, //Left motor (7/8 swapped: the D9 drove backwards)
+  8, 7, 5, //Right motor
+  A5, A4, 2, 10, //Ir analog and Lora
+  NO_PIN, NO_PIN, 4, //No ultrasonic, IR receiver
+  300 , "D9" //Threshold and LoRa name (HAMAL addresses "D9")
 );
 
 // Add the D9-specific sensors and actuators to the shared platform.
@@ -33,8 +34,11 @@ D9Platform d9(
     basePlatform,
     A3, // LDR pin
     300, // Laser threshold
-    9 // Servo pin
+    3 // Radar servo pin (D9 is the front lever servo)
 );
+
+void northLoop();
+void southLoop();
 
 // Initializes serial diagnostics and all platform hardware.
 void setup() {

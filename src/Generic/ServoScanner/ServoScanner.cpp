@@ -6,7 +6,10 @@ ServoScanner::ServoScanner(
     uint8_t minimumAngle,
     uint8_t maximumAngle,
     uint16_t stepInterval,
-    uint8_t homeAngle
+    uint8_t homeAngle,
+    uint16_t fullRangeDegrees,
+    uint16_t minimumPulseUs,
+    uint16_t maximumPulseUs
 )
     : servoPin(pin),
       angle(minimumAngle),
@@ -18,12 +21,20 @@ ServoScanner::ServoScanner(
       running(true),
       threatDetected(false),
       targetAngle(homeAngle),
-      movingToTarget(false) {}
+      movingToTarget(false),
+      servoRange(fullRangeDegrees),
+      minPulseUs(minimumPulseUs),
+      maxPulseUs(maximumPulseUs) {}
+
+// Sends a real angle to the servo, using its own range and pulse widths.
+void ServoScanner::writeAngle(uint8_t degrees) {
+    servo.writeMicroseconds(map(degrees, 0, servoRange, minPulseUs, maxPulseUs));
+}
 
 void ServoScanner::begin() {
-    servo.attach(servoPin);
+    servo.attach(servoPin, minPulseUs, maxPulseUs);
     angle = minAngle;
-    servo.write(angle);
+    writeAngle(angle);
 
     lastStepTime = millis();
     running = true;
@@ -48,7 +59,7 @@ void ServoScanner::update() {
             --angle;
         }
 
-        servo.write(angle);
+        writeAngle(angle);
 
         if (angle == targetAngle) {
             movingToTarget = false;
@@ -74,7 +85,7 @@ void ServoScanner::update() {
         }
     }
 
-    servo.write(angle);
+    writeAngle(angle);
 }
 
 uint8_t ServoScanner::getAngle() const {
@@ -90,7 +101,7 @@ void ServoScanner::moveToAngle(uint8_t target) {
     movingToTarget = false;
     Serial.print("Moving to angle: ");
     Serial.println(angle);
-    servo.write(angle);
+    writeAngle(angle);
 }
 
 // Gradual movement

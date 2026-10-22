@@ -10,6 +10,9 @@ UltrasonicSensor::UltrasonicSensor(
     lastDistance(-1.0) {}
 
 void UltrasonicSensor::begin() {
+  if (trigPin == NO_PIN) {
+    return;
+  }
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
 
@@ -17,6 +20,12 @@ void UltrasonicSensor::begin() {
 }
 
 float UltrasonicSensor::readDistanceCm() {
+  // Without a sensor, report "nothing in range" at once.
+  if (trigPin == NO_PIN) {
+    lastDistance = NO_ECHO_CM;
+    return lastDistance;
+  }
+
   // Clear the trigger pin
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
@@ -31,7 +40,7 @@ float UltrasonicSensor::readDistanceCm() {
 
   // No echo received
   if (duration == 0) {
-    lastDistance = 10000;
+    lastDistance = NO_ECHO_CM;
     return lastDistance;
   }
 

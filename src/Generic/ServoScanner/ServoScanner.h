@@ -22,13 +22,23 @@ private:
     bool movingToTarget;
     uint8_t targetAngle;
 
+    // The servo's full travel and the pulse widths at its two ends; the defaults match Servo::write().
+    uint16_t servoRange;
+    uint16_t minPulseUs;
+    uint16_t maxPulseUs;
+
+    void writeAngle(uint8_t degrees);
+
 public:
     ServoScanner(
         uint8_t pin,
         uint8_t minimumAngle = 0,
         uint8_t maximumAngle = 90,
         uint16_t stepInterval = 17,
-        uint8_t homeAngle = 0
+        uint8_t homeAngle = 0,
+        uint16_t fullRangeDegrees = 180,
+        uint16_t minimumPulseUs = 544,
+        uint16_t maximumPulseUs = 2400
     );
 
     void begin();

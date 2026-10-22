@@ -12,8 +12,6 @@ private:
     EnemyDetector enemyDetector;
     ServoScanner servoScanner;
 
-    bool threatMessageSent;
-
 public:
     D9Platform(
         GenericPlatform& basePlatform,
@@ -23,9 +21,11 @@ public:
     );
 
     void begin();
-    void findEnemy();
+    bool findEnemy();
     void tow();
     GenericPlatform& getGenericPlatform();
+    EnemyDetector& getEnemyDetector();
+    ServoScanner& getServoScanner();
 };
 
 #endif

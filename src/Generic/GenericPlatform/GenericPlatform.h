@@ -37,8 +37,8 @@ public:
   float updateDrive();
   void stopDrive();
   String listen();
-  void sendMessage(const String& to, const String& type,
-                   int x, int angle);
+  bool sendMessage(const String& to, const String& type,
+                   int x, int angle, bool waitForAck = true);
   float checkSonicDistance();
   int8_t updateIRReceiver();
   float totalDistance();

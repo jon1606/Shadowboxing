@@ -9,6 +9,9 @@
 // Estimated platform speed at the base PWM value, in centimetres per second.
 #define V_BASE_CMPS 12.0f
 
+// Tracks stop while the ultrasonic sensor sees something closer than this, in centimetres.
+#define OBSTACLE_CM 3
+
 // Minimum interval between periodic location messages, in milliseconds.
 #define LOC_INTERVAL 5000UL
 
@@ -70,11 +73,13 @@ void GenericPlatform::sendLocationIfDue() {
 
   unsigned long currentTime = millis();
   if (currentTime - lastLocationTime >= LOC_INTERVAL) {
+    // Fire and forget: waiting for the ACK here would leave the tracks driving blind.
     sendMessage(
       "HML",
       "POSITION",
       static_cast<int>(totalDistance()),
-      0
+      0,
+      false
     );
     lastLocationTime = currentTime;
   }
@@ -91,9 +96,10 @@ float GenericPlatform::updateDrive() {
   if (sensors == 2) {
     return distanceTravelled;
   }
-  int m = checkSonicDistance();
-  while(m < 3) {
+  // Pause while something is too close; driving resumes on a later call once it's clear.
+  if (checkSonicDistance() < OBSTACLE_CM) {
     driveSystem.stop();
+    return distanceTravelled;
   }
 
   uint8_t leftPWM;
@@ -103,10 +109,10 @@ float GenericPlatform::updateDrive() {
     leftPWM = BASE_PWM;
   } else if (sensors == -1) {
     rightPWM = BASE_PWM;
-    leftPWM = 1;
+    leftPWM = 0;
   } else if (sensors == 1) {
 
-    rightPWM = 1;
+    rightPWM = 0;
     leftPWM = BASE_PWM;
   }
   float vL = V_BASE_CMPS * ((float)leftPWM / BASE_PWM);
@@ -126,14 +132,20 @@ String GenericPlatform::listen() {
   return message;
 }
 
-// Sends a message and increments the message sequence counter.
-void GenericPlatform::sendMessage(
+// Sends a message and increments the message sequence counter. Returns true once it is ACKed
+// (always true when waitForAck is false).
+bool GenericPlatform::sendMessage(
   const String& to, const String& type,
-  int x, int angle
+  int x, int angle, bool waitForAck
 ) {
   static int counter = 0;
-  comunication.sendMessage(to, type, x, angle, counter);
+  bool delivered = comunication.sendMessage(to, type, x, angle, counter, waitForAck);
   counter++;
+  // A STOP can arrive while sendMessage() waits for its ACK; don't lose it.
+  if (comunication.stopReceived()) {
+    stop = true;
+  }
+  return delivered;
 }
 
 // Measures and returns the current distance reported by the ultrasonic sensor.
@@ -174,8 +186,6 @@ void GenericPlatform::driveUntilFoundIR(byte targetIRValue) {
     }
     sendLocationIfDue();
     int irValue = updateIRReceiver();
-    Serial.print("IR Value: ");
-    Serial.println(irValue);
     if (irValue == targetIRValue) {
       // Stop as soon as the requested marker is detected.
       stopDrive();

@@ -15,6 +15,12 @@
 // Minimum interval between periodic location messages, in milliseconds.
 #define LOC_INTERVAL 5000UL
 
+// Value IRReceiver::update() returns when no new code was decoded.
+#define NO_IR_CODE 100
+
+// IR marker that every platform ignores.
+#define IGNORED_IR_MARKER 12
+
 // Tracks whether location reporting is enabled by higher-level application code.
 bool locationReportingActive = false;
 
@@ -25,7 +31,6 @@ static int16_t getDistance(uint8_t ir) {
     case 15: return 0;
     case 14: return 367;
     case 13: return 348;
-    case 12: return 258;
     case 11: return 98;
     case 4:  return 219;
     case 3:  return 295;
@@ -156,6 +161,10 @@ float GenericPlatform::checkSonicDistance() {
 // Reads an IR marker and updates the travelled distance when it is recognized.
 int8_t GenericPlatform::updateIRReceiver() {
   int8_t ir = irReceiver.update();
+  // Marker 12 is ignored everywhere: reported as "nothing received" and never moves the distance.
+  if (ir == IGNORED_IR_MARKER) {
+    return NO_IR_CODE;
+  }
   if (getDistance(ir) != -1) {
     // Replace the estimated distance with the calibrated marker distance.
     distanceTravelled = getDistance(ir);

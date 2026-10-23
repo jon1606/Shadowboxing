@@ -2,7 +2,8 @@
 // Copy this file over src/main.cpp, upload, unplug USB and run it on the battery.
 //
 // Scenario:
-//   1. Power on: the tow is lifted to its top position, then a 5 s countdown.
+//   1. Power on: 1 s for the power to settle, then a 5 s countdown. Every run ends with the tow
+//      lifted, so it starts lifted (set TOW_LIFT_AT_BOOT to also lift it at power-on).
 //   2. Follow the line with the radar sweeping 50-245 deg. Whenever the laser hits the LDR, stop,
 //      point the radar at it for THREAT_HOLD_MS and broadcast THREAT to ALL over LoRa (no waiting),
 //      then keep going. It never stops for a lost line.
@@ -77,7 +78,12 @@ const unsigned long SOFT_TURN_MS = 150;         // how long a correction stays g
 const unsigned long CURVE_MS = 120;             // a correction this long counts as a curve
 const unsigned long TURN_HOLD_MS = 0;           // keep turning this long after a curve's line slips away (0 = off; 1500 overshot on straights)
 
+const unsigned long POWER_SETTLE_MS = 1000;     // let the battery connection settle before anything moves
 const unsigned long START_DELAY_MS = 5000;
+// Lifting the tow at power-on pushes it against its top stop. With the tow servo powered from the
+// Arduino's 5 V, that stall current resets the Arduino and it never starts driving. Only turn this
+// on once the tow is powered from the 6 V servo rail.
+const bool TOW_LIFT_AT_BOOT = false;
 const unsigned long THREAT_HOLD_MS = 3000;
 const unsigned long CLEAR_MS = 500;             // laser must be gone this long before it counts again
 const int REVERSE_PWM = 200;                    // track speed while reversing past the recorded path
@@ -321,13 +327,14 @@ void runTow() {
 void setup() {
   Serial.begin(9600);
   pinMode(LED, OUTPUT);
-  Serial.println(F("D9 field demo: booting"));
   tracks.begin();
-  // Always start with the tow lifted. Done before the radar attaches, with a pause, so the two
-  // servos never start moving at the same moment (a big current spike can reset the Arduino).
-  towUp();
-  delay(500);
-  Serial.println(F("Starting platform (radar homes to 0 deg)"));
+  Serial.println(F("D9 field demo: booting"));
+  delay(POWER_SETTLE_MS);
+  if (TOW_LIFT_AT_BOOT) {
+    towUp();
+    delay(500);
+  }
+  Serial.println(F("Starting platform (radar homes to its start angle)"));
   d9.begin();
   delay(500);
   Serial.println(F("Starting in 5 s"));

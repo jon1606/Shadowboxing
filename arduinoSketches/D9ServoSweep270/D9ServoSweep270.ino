@@ -1,4 +1,4 @@
-// Sweeps the 270-degree radar servo on D3 back and forth, 0-180 deg.
+// Sweeps the 270-degree radar servo on D3 back and forth, 50-245 deg (the D9 sweep).
 #include <Servo.h>
 
 // Pulse widths for 0 and 270 deg. Most 270-degree servos use 500-2500 us; adjust if the ends
@@ -6,7 +6,8 @@
 const int PULSE_MIN = 500;
 const int PULSE_MAX = 2500;
 const int SERVO_RANGE = 270;  // full travel of the servo
-const int SWEEP_MAX = 180;    // how far the sweep goes
+const int SWEEP_MIN = 50;     // sweep ends, as in D9.cpp
+const int SWEEP_MAX = 245;
 
 Servo radar;
 
@@ -20,11 +21,11 @@ void setup() {
 }
 
 void loop() {
-  for (int angle = 0; angle <= SWEEP_MAX; angle++) {
+  for (int angle = SWEEP_MIN; angle <= SWEEP_MAX; angle++) {
     moveTo(angle);
     delay(10);
   }
-  for (int angle = SWEEP_MAX; angle >= 0; angle--) {
+  for (int angle = SWEEP_MAX; angle >= SWEEP_MIN; angle--) {
     moveTo(angle);
     delay(10);
   }

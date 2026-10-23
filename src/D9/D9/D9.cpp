@@ -3,9 +3,10 @@
 // How long findEnemy() scans at one stop before giving up and letting the route continue.
 #define SCAN_TIMEOUT_MS 20000UL
 
-// The radar sweeps 0-180 deg on a 270-degree servo (500-2500 us across its full travel).
-#define RADAR_MIN_ANGLE 0
-#define RADAR_MAX_ANGLE 180
+// The radar sweeps 50-245 deg on a 270-degree servo (500-2500 us across its full travel);
+// the ends were found with mainRadarCalibrate.cpp so the sweep is even on both sides.
+#define RADAR_MIN_ANGLE 50
+#define RADAR_MAX_ANGLE 245
 #define RADAR_STEP_MS 17
 #define RADAR_SERVO_RANGE 270
 #define RADAR_MIN_PULSE_US 500

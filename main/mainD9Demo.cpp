@@ -1,29 +1,30 @@
-// D9 field demo: line following + threat scanning, no computer or HAMAL needed.
+// D9 field demo: runs the whole scenario on its own, no HAMAL or computer needed.
 // Copy this file over src/main.cpp, upload, unplug USB and run it on the battery.
 //
-// While following the line the radar keeps sweeping 0-180 deg. At an IR marker the D9 stops and
-// sweeps MARKER_SWEEPS full passes, then drives on. Whenever the laser hits the LDR (driving or
-// stopped), the D9 stops, points the radar at it for THREAT_HOLD_MS, then follows the line again.
-// It never stops for a lost line.
+// Scenario:
+//   1. Power on: the tow is lifted to its top position, then a 5 s countdown.
+//   2. Follow the line with the radar sweeping 50-245 deg. Whenever the laser hits the LDR, stop,
+//      point the radar at it for THREAT_HOLD_MS and broadcast THREAT to ALL over LoRa (no waiting),
+//      then keep going. It never stops for a lost line.
+//   3. At IR marker 13: stop, lower the tow, drive backwards for REVERSE_MS, stop, lift the tow.
+//      That ends the scenario; everything stays stopped until reset.
 //
-// Line following = updateDrive()'s steering plus turn memory: after a long correction (a curve),
-// if both sensors go dark it keeps turning the same way for up to TURN_HOLD_MS, so a sharp turn
-// that slips past a sensor gets caught again instead of the D9 driving straight off it.
-//
-// HAMAL link (LoRa, this D9 is "D9"):
-//   waits for GO before moving; STOP stops everything for good (until reset);
-//   THREAT (x = distance, angle) goes to HML on every laser hit, waiting for its ACK while stopped;
-//   POSITION goes to HML every 5 s while driving and at each marker (no waiting).
+// Reversing retraces the path: while following the line, the D9 records its track speeds every
+// RECORD_MS for the last REVERSE_MS; at marker 13 it plays them back newest first with both tracks
+// reversed, which drives the same curves backwards. The line sensors sit at the front, so steering
+// by them in reverse is unstable on its own; REVERSE_TRIM_PWM (0 = off) adds a gentle correction
+// on top of the replay.
 //
 // Board LED (D13):
-//   slow blink (1 s)  = waiting for GO from the HAMAL, put the D9 on the line
+//   slow blink (1 s)  = start countdown, put the D9 on the line
 //   on                = following the line (radar sweeping)
-//   blink (0.5 s)     = stopped at a marker, sweeping
 //   off               = threat found, the radar points at it
-//   fast blink        = STOP received, everything stopped
+//   blink (0.5 s)     = towing
+//   fast blink        = scenario finished
 // With USB plugged in, the Serial Monitor (9600) logs every step.
 #include "Generic/GenericPlatform/GenericPlatform.h"
 #include <Arduino.h>
+#include <Servo.h>
 #include "D9/D9/D9.h"
 #include "Generic/Motor/Motor.h"
 #include "Generic/TankDrive/TankDrive.h"
@@ -49,51 +50,64 @@ Motor leftMotor(8, 7, 6);
 Motor rightMotor(8, 7, 5);
 TankDrive tracks(leftMotor, rightMotor);
 
+// Tow: FS90R continuous servo, moved by time (calibrated with mainTowTest.cpp).
+Servo tow;
+const uint8_t TOW_PIN = 11;
+const int TOW_STOP_US = 1500;
+const int TOW_SPEED_US = 60;                 // down = stop - speed, up = stop + speed
+const unsigned long TOW_DOWN_MS = 300;
+const unsigned long TOW_UP_MS = 400;
+
 const uint8_t LEFT_LINE_PIN = A5;
 const uint8_t RIGHT_LINE_PIN = A4;
 const int LINE_THRESHOLD = 300;
 const uint8_t LED = LED_BUILTIN;
 
-// Radar sweep limits, as set in D9.cpp.
-const uint8_t RADAR_MIN = 0;
-const uint8_t RADAR_MAX = 180;
-
 // Value updateIRReceiver() returns when no marker was seen.
 const int8_t NO_MARKER = 100;
-
-// The route's IR markers (northLoop()/southLoop() in mainD9.cpp); any other code is noise.
-const int8_t ROUTE_MARKERS[] = {2, 4, 11, 13, 16};
-const unsigned long MARKER_CONFIRM_MS = 300;    // the same marker must show up twice within this
+const int8_t TOW_MARKER = 13;
+const unsigned long MARKER_CONFIRM_MS = 300;    // the marker must show up twice within this
 const uint8_t THREAT_CONFIRM_READS = 3;         // LDR readings in a row under the threshold
 
 // Line following, same speeds as GenericPlatform.cpp.
 const int BASE_PWM = 200;
-const int TURN_PWM = 0;                         // inner track while steering
+const int TURN_PWM = 0;                         // inner track once a correction lasts (hard turn)
+const int SOFT_TURN_PWM = 120;                  // inner track at the start of a correction (gentle turn)
+const unsigned long SOFT_TURN_MS = 150;         // how long a correction stays gentle (0 = always hard)
 const unsigned long CURVE_MS = 120;             // a correction this long counts as a curve
 const unsigned long TURN_HOLD_MS = 0;           // keep turning this long after a curve's line slips away (0 = off; 1500 overshot on straights)
 
-const uint8_t MARKER_SWEEPS = 2;                // full 0-180 passes at each marker
-const unsigned long MARKER_COOLDOWN_MS = 3000;  // ignore the same marker this long after leaving it
+const unsigned long START_DELAY_MS = 5000;
 const unsigned long THREAT_HOLD_MS = 3000;
 const unsigned long CLEAR_MS = 500;             // laser must be gone this long before it counts again
+const int REVERSE_PWM = 200;                    // track speed while reversing past the recorded path
+const unsigned long REVERSE_MS = 7000;
+const unsigned long RECORD_MS = 50;             // how often the track speeds are recorded
+const uint8_t RECORD_SIZE = REVERSE_MS / RECORD_MS;
+const int REVERSE_TRIM_PWM = 0;                 // sensor correction while reversing (0 = off, try 30-60)
 
-enum Phase { DRIVING, MARKER_SCAN, THREAT, STOPPED };
+enum Phase { DRIVING, THREAT, FINISHED };
 
 Phase phase = DRIVING;
 unsigned long phaseStart = 0;
 int8_t turnDirection = 0;        // 1 steering right, -1 steering left, 0 straight
 unsigned long correctionStart = 0;
 unsigned long holdUntil = 0;     // keep turning until this time after a curve
-uint8_t sweepsDone = 0;
-uint8_t lastEnd = RADAR_MIN;     // which end of the sweep the radar touched last
-int8_t lastMarker = NO_MARKER;
-unsigned long markerLeftAt = 0;
 bool laserArmed = true;          // false right after a threat, until the laser has gone away
 uint8_t laserReads = 0;          // readings in a row under the threshold
+unsigned long laserClearSince = 0;
 int8_t markerCandidate = NO_MARKER;
 unsigned long markerCandidateAt = 0;
-unsigned long laserClearSince = 0;
 uint16_t threats = 0;
+
+// Track speeds of the last REVERSE_MS of driving, oldest overwritten first.
+uint8_t recordLeft[RECORD_SIZE];
+uint8_t recordRight[RECORD_SIZE];
+uint8_t recordHead = 0;          // next slot to write; the newest sample is just before it
+uint8_t recordCount = 0;
+unsigned long lastRecord = 0;
+int driveLeft = 0;               // track speeds followLine() set last
+int driveRight = 0;
 
 // Prints "[seconds] " before a log line.
 void logTime() {
@@ -105,6 +119,51 @@ void logTime() {
 void enterPhase(Phase next) {
   phase = next;
   phaseStart = millis();
+}
+
+// Turns the tow servo at speedUs from the stop pulse for ms (negative speed = down), then
+// stops it and lets it go limp.
+void turnTow(int speedUs, unsigned long ms) {
+  tow.writeMicroseconds(TOW_STOP_US + speedUs);
+  tow.attach(TOW_PIN);
+  delay(ms);
+  tow.writeMicroseconds(TOW_STOP_US);
+  delay(40);
+  tow.detach();
+}
+
+void towUp() {
+  logTime();
+  Serial.println(F("Tow up"));
+  turnTow(TOW_SPEED_US, TOW_UP_MS);
+}
+
+void towDown() {
+  logTime();
+  Serial.println(F("Tow down"));
+  turnTow(-TOW_SPEED_US, TOW_DOWN_MS);
+}
+
+// Drives forward and remembers the speeds for recording.
+void driveForward(int left, int right) {
+  driveLeft = left;
+  driveRight = right;
+  tracks.drive(left, right);
+}
+
+// Stores the current track speeds every RECORD_MS while following the line.
+void recordDriving() {
+  unsigned long now = millis();
+  if (now - lastRecord < RECORD_MS) {
+    return;
+  }
+  lastRecord = now;
+  recordLeft[recordHead] = driveLeft;
+  recordRight[recordHead] = driveRight;
+  recordHead = (recordHead + 1) % RECORD_SIZE;
+  if (recordCount < RECORD_SIZE) {
+    recordCount++;
+  }
 }
 
 // Steers the tracks like updateDrive(), plus turn memory for sharp curves.
@@ -133,30 +192,14 @@ void followLine() {
   }
   // Neither sensor dark: keep the last command, as updateDrive() does.
 
+  // Small drifts get a gentle correction; one that lasts (a real curve) turns hard.
+  int inner = now - correctionStart < SOFT_TURN_MS ? SOFT_TURN_PWM : TURN_PWM;
   if (turnDirection > 0) {
-    tracks.drive(BASE_PWM, TURN_PWM);
+    driveForward(BASE_PWM, inner);
   } else if (turnDirection < 0) {
-    tracks.drive(TURN_PWM, BASE_PWM);
+    driveForward(inner, BASE_PWM);
   } else {
-    tracks.drive(BASE_PWM, BASE_PWM);
-  }
-}
-
-// Restarts the radar sweep from 0 deg and starts counting full passes again.
-void restartRadar() {
-  d9.getServoScanner().begin();
-  sweepsDone = 0;
-  lastEnd = RADAR_MIN;
-}
-
-// Steps the radar and counts a pass each time it reaches the opposite end.
-void sweepRadar() {
-  ServoScanner& radar = d9.getServoScanner();
-  radar.update();
-  uint8_t angle = radar.getAngle();
-  if ((angle >= RADAR_MAX && lastEnd == RADAR_MIN) || (angle <= RADAR_MIN && lastEnd == RADAR_MAX)) {
-    lastEnd = angle >= RADAR_MAX ? RADAR_MAX : RADAR_MIN;
-    sweepsDone++;
+    driveForward(BASE_PWM, BASE_PWM);
   }
 }
 
@@ -176,30 +219,26 @@ bool laserHit() {
   return laserReads >= THREAT_CONFIRM_READS;
 }
 
-// Returns a route marker once it has been seen twice within MARKER_CONFIRM_MS, else NO_MARKER.
-int8_t confirmedMarker() {
+// True once the tow marker has been seen twice within MARKER_CONFIRM_MS; other codes are ignored.
+bool towMarkerSeen() {
   int8_t code = basePlatform.updateIRReceiver();
-  bool onRoute = false;
-  for (uint8_t i = 0; i < sizeof(ROUTE_MARKERS); i++) {
-    onRoute = onRoute || code == ROUTE_MARKERS[i];
-  }
-  if (!onRoute) {
-    return NO_MARKER;
+  if (code != TOW_MARKER) {
+    return false;
   }
   unsigned long now = millis();
   if (code == markerCandidate && now - markerCandidateAt <= MARKER_CONFIRM_MS) {
-    markerCandidate = NO_MARKER;
-    return code;
+    return true;
   }
   markerCandidate = code;
   markerCandidateAt = now;
-  return NO_MARKER;
+  return false;
 }
 
-// Resumes line following. The turn memory is kept, so a stop in the middle of a curve
-// carries on turning the same way.
 void startDriving() {
-  restartRadar();
+  // begin() restarts the radar sweep from 0 deg.
+  d9.getServoScanner().begin();
+  // Time spent stopped isn't part of the path, so recording restarts from now.
+  lastRecord = millis();
   logTime();
   Serial.println(F("Following the line, radar sweeping"));
   enterPhase(DRIVING);
@@ -219,110 +258,105 @@ void threatFound() {
   Serial.print(radar.getAngle());
   Serial.print(F(" deg, ldr "));
   Serial.println(d9.getEnemyDetector().getLastReading());
-  // The tracks are stopped, so waiting for the ACK (with resends) is safe here.
-  bool acked = basePlatform.sendMessage("HML", "THREAT", (int)basePlatform.totalDistance(), radar.getAngle());
-  logTime();
-  Serial.println(acked ? F("THREAT ACKed by HML") : F("THREAT not ACKed"));
+  // Broadcast, fire and forget: nobody has to answer.
+  basePlatform.sendMessage("ALL", "THREAT", (int)basePlatform.totalDistance(), radar.getAngle(), false);
   enterPhase(THREAT);
 }
 
-// Logs every message the radio hands over, so missed or garbled commands show up in the log.
-void logReceived(const String& message) {
-  if (message.length() == 0) {
-    return;
-  }
+// Replays the recorded track speeds newest first with both tracks reversed, for REVERSE_MS.
+// If less than REVERSE_MS was recorded, the rest is driven straight back.
+void reverseAlongPath() {
   logTime();
-  Serial.print(F("LoRa rx: "));
-  Serial.println(message);
+  Serial.print(F("Reversing 7 s along the recorded path ("));
+  Serial.print(recordCount * RECORD_MS);
+  Serial.println(F(" ms recorded)"));
+  uint8_t index = recordHead;
+  uint8_t remaining = recordCount;
+  unsigned long start = millis();
+  while (millis() - start < REVERSE_MS) {
+    int left = REVERSE_PWM;
+    int right = REVERSE_PWM;
+    if (remaining > 0) {
+      index = (index + RECORD_SIZE - 1) % RECORD_SIZE;
+      left = recordLeft[index];
+      right = recordRight[index];
+      remaining--;
+    }
+    if (REVERSE_TRIM_PWM > 0) {
+      // Same decision as forward; in reverse the correction slows the track that was fast.
+      bool leftDark = analogRead(LEFT_LINE_PIN) > LINE_THRESHOLD;
+      bool rightDark = analogRead(RIGHT_LINE_PIN) > LINE_THRESHOLD;
+      if (leftDark && !rightDark) {
+        left = max(0, left - REVERSE_TRIM_PWM);
+      } else if (rightDark && !leftDark) {
+        right = max(0, right - REVERSE_TRIM_PWM);
+      }
+    }
+    tracks.drive(-left, -right);
+    unsigned long stepStart = millis();
+    while (millis() - stepStart < RECORD_MS) {
+      digitalWrite(LED, (millis() / 250) % 2);
+    }
+  }
+  tracks.stop();
 }
 
-// Checks the radio; on STOP, stops the tracks and radar for good. Returns true if stopped.
-bool stopRequested() {
-  logReceived(basePlatform.listen());
-  if (!basePlatform.needToStop()) {
-    return false;
-  }
-  if (phase != STOPPED) {
-    tracks.stop();
-    d9.getServoScanner().stop();
-    logTime();
-    Serial.println(F("STOP from HAMAL, everything stopped"));
-    enterPhase(STOPPED);
-  }
-  return true;
+// Marker 13: lower the tow, drive backwards with it, stop, lift it. Ends the scenario.
+void runTow() {
+  tracks.stop();
+  d9.getServoScanner().stop();
+  digitalWrite(LED, HIGH);
+  logTime();
+  Serial.println(F("IR marker 13: towing"));
+  towDown();
+  delay(500);
+  reverseAlongPath();
+  delay(300);
+  towUp();
+  logTime();
+  Serial.println(F("Scenario finished"));
+  enterPhase(FINISHED);
 }
 
 void setup() {
   Serial.begin(9600);
-  d9.begin();
-  tracks.begin();
   pinMode(LED, OUTPUT);
-  Serial.println(F("D9 field demo: waiting for GO from the HAMAL"));
-  while (true) {
+  Serial.println(F("D9 field demo: booting"));
+  tracks.begin();
+  // Always start with the tow lifted. Done before the radar attaches, with a pause, so the two
+  // servos never start moving at the same moment (a big current spike can reset the Arduino).
+  towUp();
+  delay(500);
+  Serial.println(F("Starting platform (radar homes to 0 deg)"));
+  d9.begin();
+  delay(500);
+  Serial.println(F("Starting in 5 s"));
+  unsigned long start = millis();
+  while (millis() - start < START_DELAY_MS) {
     digitalWrite(LED, (millis() / 500) % 2);
-    String message = basePlatform.listen();
-    logReceived(message);
-    if (basePlatform.needToStop()) {
-      stopRequested();
-      return;
-    }
-    if (message.startsWith("GO")) {
-      break;
-    }
   }
-  logTime();
-  Serial.println(F("GO received"));
   startDriving();
 }
 
 void loop() {
   unsigned long now = millis();
-  if (stopRequested()) {
-    digitalWrite(LED, (now / 100) % 2);
-    return;
-  }
 
   if (phase == DRIVING) {
     digitalWrite(LED, HIGH);
     followLine();
-    sweepRadar();
-    // Fire and forget, every 5 s (GenericPlatform's LOC_INTERVAL).
-    basePlatform.sendLocationIfDue();
+    recordDriving();
+    d9.getServoScanner().update();
     if (laserHit()) {
       threatFound();
-      return;
+    } else if (towMarkerSeen()) {
+      runTow();
     }
-
-    int8_t marker = confirmedMarker();
-    bool sameMarkerTooSoon = marker == lastMarker && now - markerLeftAt < MARKER_COOLDOWN_MS;
-    if (marker != NO_MARKER && !sameMarkerTooSoon) {
-      tracks.stop();
-      lastMarker = marker;
-      restartRadar();
-      logTime();
-      Serial.print(F("IR marker "));
-      Serial.print((uint8_t)marker);
-      Serial.println(F(", stopped to sweep"));
-      // updateIRReceiver() already set the distance to this marker's calibrated value.
-      basePlatform.sendMessage("HML", "POSITION", (int)basePlatform.totalDistance(), 0, false);
-      enterPhase(MARKER_SCAN);
-    }
-  } else if (phase == MARKER_SCAN) {
-    digitalWrite(LED, (now / 250) % 2);
-    sweepRadar();
-    if (laserHit()) {
-      threatFound();
-    } else if (sweepsDone >= MARKER_SWEEPS) {
-      logTime();
-      Serial.println(F("No threat at this marker"));
-      markerLeftAt = now;
+  } else if (phase == THREAT) {
+    digitalWrite(LED, LOW);
+    if (now - phaseStart >= THREAT_HOLD_MS) {
       startDriving();
     }
   } else {
-    digitalWrite(LED, LOW);
-    if (now - phaseStart >= THREAT_HOLD_MS) {
-      markerLeftAt = now;
-      startDriving();
-    }
+    digitalWrite(LED, (now / 100) % 2);
   }
 }

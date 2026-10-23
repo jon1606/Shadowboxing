@@ -2,7 +2,7 @@
 // (the servo needs the 6 V servo rail). The tracks are held off the whole time.
 // Same sweep and detection as the mission code (ServoScanner + EnemyDetector).
 //
-// The radar (a 270-degree servo) sweeps 0-180 deg. When the laser hits the LDR it stops and points there.
+// The radar (a 270-degree servo) sweeps 50-245 deg. When the laser hits the LDR it stops and points there.
 // Board LED (D13):
 //   off         = scanning
 //   on          = threat found, holding that angle for 3 s
@@ -20,8 +20,8 @@ const uint8_t RIGHT_EN = 5;
 
 // Tuning, same values as mainD9.cpp / ServoScanner.
 const int LASER_THRESHOLD = 300;          // a reading below this = laser on the LDR
-const uint8_t MIN_ANGLE = 0;
-const uint8_t MAX_ANGLE = 180;
+const uint8_t MIN_ANGLE = 50;
+const uint8_t MAX_ANGLE = 245;
 const unsigned long STEP_MS = 17;         // 1 deg per step, about 3 s per sweep
 const unsigned long HOLD_MS = 3000;       // how long to point at a threat
 const unsigned long CLEAR_MS = 500;       // laser must be gone this long before scanning again

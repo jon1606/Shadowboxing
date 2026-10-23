@@ -1054,7 +1054,7 @@ void D9Test::testLdr() {
     printRange(F("ldr"), low, high);
 }
 
-// Runs the real ServoScanner sweep (0-180 deg, 1 deg every 17 ms) and logs the angle.
+// Runs the real ServoScanner sweep (50-245 deg, 1 deg every 17 ms) and logs the angle.
 void D9Test::testServoSweep() {
     printHeader(F("SCANNER SWEEP"));
     if (!ensureServo()) {
@@ -1081,13 +1081,13 @@ void D9Test::testServoAngle() {
         return;
     }
     while (true) {
-        Serial.print(F("Angle 0-180, Enter to finish: "));
+        Serial.print(F("Angle 50-245, Enter to finish: "));
         char buffer[6];
         if (readLine(buffer, sizeof(buffer)) == 0) {
             return;
         }
         long angle = atol(buffer);
-        if (angle >= 0 && angle <= 180) {
+        if (angle >= 50 && angle <= 245) {
             d9.getServoScanner().moveToAngle(angle);
         }
     }

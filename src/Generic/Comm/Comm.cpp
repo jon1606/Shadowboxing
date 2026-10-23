@@ -6,6 +6,9 @@
 // How many times sendMessage() resends an unacknowledged message before giving up.
 #define MAX_RETRIES 3
 
+// A partial line with no new bytes for this long is handled as complete (readStringUntil's timeout).
+#define LINE_TIMEOUT_MS 1000UL
+
 // Initializes the software serial connection and identifies this device as the sender.
 Comm::Comm(
   uint8_t txdPin,
@@ -17,6 +20,7 @@ Comm::Comm(
     sender(name),
     lineLength(0),
     lineTooLong(false),
+    lastByteAt(0),
     lastAckCounter(0),
     stopSeen(false)
 {}
@@ -61,10 +65,9 @@ bool Comm::sendMessage(String to, String type, int x, int angle, int counter, bo
 String Comm::listen() {
   while (loraSerial.available()) {
     char c = loraSerial.read();
-    if (c == '\r') {
-      continue;
-    }
-    if (c != '\n') {
+    lastByteAt = millis();
+    // A line ends at '\n' or '\r' (so "\r\n", "\n" and "\r" senders all work).
+    if (c != '\n' && c != '\r') {
       if (lineLength < COMM_LINE_SIZE - 1) {
         line[lineLength++] = c;
       } else {
@@ -72,22 +75,31 @@ String Comm::listen() {
       }
       continue;
     }
-
-    line[lineLength] = '\0';
-    bool dropLine = lineTooLong;
-    lineLength = 0;
-    lineTooLong = false;
-    if (dropLine) {
-      continue;
-    }
-    String result = handleLine();
+    String result = finishLine();
     if (result.length() > 0) {
       return result;
     }
   }
 
+  // Like the old readStringUntil(), a line that stops arriving without an end counts as complete.
+  if ((lineLength > 0 || lineTooLong) && millis() - lastByteAt >= LINE_TIMEOUT_MS) {
+    return finishLine();
+  }
+
   // Report that no complete message is currently available.
   return "";
+}
+
+// Closes the line being received and handles it; empty and over-long lines give "".
+String Comm::finishLine() {
+  line[lineLength] = '\0';
+  bool dropLine = lineTooLong || lineLength == 0;
+  lineLength = 0;
+  lineTooLong = false;
+  if (dropLine) {
+    return "";
+  }
+  return handleLine();
 }
 
 // Parses the completed line (sender|to|type|x|angle|counter), ACKs it when it is for us,

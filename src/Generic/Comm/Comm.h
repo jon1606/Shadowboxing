@@ -17,12 +17,14 @@ private:
   char line[COMM_LINE_SIZE];
   uint8_t lineLength;
   bool lineTooLong;
+  unsigned long lastByteAt;
 
   // Counter of the last ACK addressed to us, so sendMessage() only accepts the ACK for its own message.
   uint16_t lastAckCounter;
   bool stopSeen;
 
   String handleLine();
+  String finishLine();
 
 public:
   Comm(

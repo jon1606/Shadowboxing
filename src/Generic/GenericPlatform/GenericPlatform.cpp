@@ -61,7 +61,10 @@ GenericPlatform::GenericPlatform(
     irReceiver(ir),
     distanceTravelled(0.0f),
     stop(false),
-    tracksStopped(true) {}
+    tracksStopped(true),
+    lastLeftPwm(0),
+    lastRightPwm(0),
+    lastDriveTime(0) {}
 
 // Initializes every hardware subsystem used by the platform.
 void GenericPlatform::begin() {
@@ -133,6 +136,27 @@ float GenericPlatform::updateDrive() {
   driveSystem.drive(leftPWM, rightPWM);
   tracksStopped = false;
   return distanceTravelled;
+}
+
+// Returns the line sensors' decision, as LineFollower::update(): 0 straight, 1 steer right,
+// -1 steer left, 2 neither sensor on the road.
+int8_t GenericPlatform::readLine() {
+  return lineFollower.update();
+}
+
+// Drives the tracks at -255..255 (negative = reverse), for platforms that steer themselves, and adds
+// the distance covered at the previous speeds to the travelled distance.
+void GenericPlatform::driveTracks(int leftPwm, int rightPwm) {
+  unsigned long now = millis();
+  if (!tracksStopped) {
+    float seconds = (now - lastDriveTime) / 1000.0f;
+    distanceTravelled += V_BASE_CMPS * ((lastLeftPwm + lastRightPwm) * 0.5f / BASE_PWM) * seconds;
+  }
+  lastDriveTime = now;
+  lastLeftPwm = leftPwm;
+  lastRightPwm = rightPwm;
+  driveSystem.drive(leftPwm, rightPwm);
+  tracksStopped = false;
 }
 
 // Reads and returns the next message received by the communication subsystem.

@@ -16,7 +16,8 @@ const uint8_t SONIC_TRIG = NO_PIN, SONIC_ECHO = NO_PIN;  // the D9 has no ultras
 const uint8_t IR_RECEIVER = 4;
 const uint8_t LDR_PIN = A3;
 const uint16_t LASER_THRESHOLD = 300;
-const uint8_t SERVO_PIN = 3;   // radar servo; front lever is on D9, tow on D11 (no code yet)
+const uint8_t SERVO_PIN = 3;   // radar servo; the front lever is on D9 (no code yet)
+const uint8_t TOW_PIN = 11;    // tow hook (FS90R continuous servo)
 
 GenericPlatform basePlatform(
   LEFT_IN1, LEFT_IN2, LEFT_EN,
@@ -26,7 +27,7 @@ GenericPlatform basePlatform(
   LINE_THRESHOLD, PLATFORM_NAME
 );
 
-D9Platform d9(basePlatform, LDR_PIN, LASER_THRESHOLD, SERVO_PIN);
+D9Platform d9(basePlatform, LDR_PIN, LASER_THRESHOLD, SERVO_PIN, TOW_PIN);
 
 D9Test tester(
     d9,

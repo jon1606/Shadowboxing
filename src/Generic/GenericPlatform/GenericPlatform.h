@@ -23,6 +23,11 @@ private:
   bool stop;
   bool tracksStopped;
 
+  // Speeds and time of the last driveTracks() command, for the distance estimate.
+  int16_t lastLeftPwm;
+  int16_t lastRightPwm;
+  unsigned long lastDriveTime;
+
 public:
   GenericPlatform(
     const uint8_t leftIn1, const uint8_t leftIn2, const uint8_t leftEnable,
@@ -36,6 +41,8 @@ public:
 
   void begin();
   float updateDrive();
+  int8_t readLine();
+  void driveTracks(int leftPwm, int rightPwm);
   void stopDrive();
   String listen();
   bool sendMessage(const String& to, const String& type,

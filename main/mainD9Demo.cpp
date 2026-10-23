@@ -10,13 +10,15 @@
 //   3. At each IR point (any code; 12 is ignored everywhere): stop and sweep the radar
 //      MARKER_SWEEPS full passes, then drive on. Each IR code is handled only the first time it is
 //      read; after that it is ignored for the rest of the run.
+//   IR debug messages to ALL (x = the code): IR when an IR point is read for the first time and acted
+//   on, IGNORED when a code that was already recorded this run is read again (once per IR_REPORT_MS
+//   per code).
 //   4. At the tow point (TOW_MARKER): stop, lower the tow, drive backwards for REVERSE_MS, stop,
 //      lift the tow, then follow the line again.
 //
-// The run's memory (IR points already handled, whether the tow is down) survives a reset that isn't
-// a power cut, e.g. a battery dip while reversing with the load. After such a reset the LED flashes
-// 3 times, handled IR points stay skipped (so the tow doesn't repeat) and a tow caught down is lifted.
-// To start a fresh run, unplug the battery for a few seconds (the reset button keeps the memory).
+// Every boot (power-on, reset button, upload) starts a fresh run: no IR point is handled yet.
+// Only an unfinished tow is remembered across a reset (e.g. a battery dip while reversing with the
+// load): the LED flashes 3 times, the tow is lifted and the tow point is skipped, so it can't loop.
 //
 // Reversing retraces the path: while following the line, the D9 records its track speeds every
 // RECORD_MS for the last REVERSE_MS; at the tow point it plays them back newest first with both tracks
@@ -25,7 +27,7 @@
 // on top of the replay.
 //
 // Board LED (D13):
-//   3 quick flashes   = it restarted after a reset (not a power cut)
+//   3 quick flashes   = a reset interrupted the tow; the tow point is skipped this run
 //   slow blink (1 s)  = start countdown, put the D9 on the line
 //   on                = following the line (radar sweeping)
 //   blink (0.5 s)     = stopped at an IR point, sweeping
@@ -76,8 +78,8 @@ const uint8_t LED = LED_BUILTIN;
 // Value updateIRReceiver() returns when no marker was seen.
 const int8_t NO_MARKER = 100;
 const int8_t TOW_MARKER = 16;
-const unsigned long MARKER_CONFIRM_MS = 300;    // a code must show up twice within this to count
 const uint8_t MARKER_SWEEPS = 2;                // full radar passes at each IR point
+const unsigned long IR_REPORT_MS = 2000;        // the same IR code is broadcast at most this often
 
 // Radar sweep limits, as set in D9.cpp.
 const uint8_t RADAR_MIN = 50;
@@ -120,19 +122,19 @@ unsigned long holdUntil = 0;     // keep turning until this time after a curve
 bool laserArmed = true;          // false right after a threat, until the laser has gone away
 uint8_t laserReads = 0;          // readings in a row under the threshold
 unsigned long laserClearSince = 0;
-int8_t markerCandidate = NO_MARKER;
-unsigned long markerCandidateAt = 0;
 uint8_t sweepsDone = 0;
 uint8_t lastEnd = RADAR_MIN;     // which end of the sweep the radar touched last
 uint16_t threats = 0;
+int8_t lastReportedCode = NO_MARKER;
+unsigned long lastReportAt = 0;
+bool markerRecorded[256];        // one flag per IR code: true once it was read this run; cleared every boot
 
-// Run memory kept in .noinit RAM: a reset leaves it alone, only a power cut loses it. The magic number
-// and checksum tell a real saved state from the random contents RAM has after power-on.
+// Tow progress kept in .noinit RAM: a reset leaves it alone, only a power cut loses it. The magic
+// number and checksum tell a real saved state from the random contents RAM has after power-on.
 struct RunState {
   uint32_t magic;
-  uint8_t handled[32];   // one bit per IR code (0-255) already handled this run
+  bool towInProgress;    // set from the tow's start until the tow is lifted again
   bool towIsDown;
-  uint8_t resets;        // resets since the run started
   uint8_t check;
 };
 const uint32_t RUN_MAGIC = 0xD9C0FFEEUL;
@@ -281,26 +283,36 @@ bool laserHit() {
   return laserReads >= THREAT_CONFIRM_READS;
 }
 
-// Returns an IR code the first time it is read (seen twice within MARKER_CONFIRM_MS, to filter
-// noise); a code that was already handled this run returns NO_MARKER.
+// Sends an IR debug message to ALL (fire and forget). IGNORED repeats at most every IR_REPORT_MS
+// per code; IR (a new point) is always sent.
+void reportIrCode(const char* type, int8_t code) {
+  unsigned long now = millis();
+  bool always = type[0] == 'I' && type[1] == 'R';
+  if (!always && code == lastReportedCode && now - lastReportAt < IR_REPORT_MS) {
+    return;
+  }
+  lastReportedCode = code;
+  lastReportAt = now;
+  logTime();
+  Serial.print(type);
+  Serial.print(F(" "));
+  Serial.println((uint8_t)code);
+  basePlatform.sendMessage("ALL", type, (uint8_t)code, 0, false);
+}
+
+// Returns an IR code the first time it is read this run and records it; a code that was
+// already recorded returns NO_MARKER.
 int8_t newMarker() {
   int8_t code = basePlatform.updateIRReceiver();
   if (code == NO_MARKER) {
     return NO_MARKER;
   }
-  uint8_t index = (uint8_t)code;
-  if (runState.handled[index / 8] & (1 << (index % 8))) {
+  if (markerRecorded[(uint8_t)code]) {
+    reportIrCode("IGNORED", code);
     return NO_MARKER;
   }
-  unsigned long now = millis();
-  if (code != markerCandidate || now - markerCandidateAt > MARKER_CONFIRM_MS) {
-    markerCandidate = code;
-    markerCandidateAt = now;
-    return NO_MARKER;
-  }
-  markerCandidate = NO_MARKER;
-  runState.handled[index / 8] |= 1 << (index % 8);
-  saveRunState();
+  markerRecorded[(uint8_t)code] = true;
+  reportIrCode("IR", code);
   return code;
 }
 
@@ -412,11 +424,15 @@ void runTow(int8_t marker) {
   Serial.print(F("IR point "));
   Serial.print((uint8_t)marker);
   Serial.println(F(": towing"));
+  runState.towInProgress = true;
+  saveRunState();
   towDown();
   delay(500);
   reverseAlongPath();
   delay(300);
   towUp();
+  runState.towInProgress = false;
+  saveRunState();
   // The recorded path was used up driving back.
   recordHead = 0;
   recordCount = 0;
@@ -429,12 +445,9 @@ void setup() {
   tracks.begin();
   Serial.println(F("D9 field demo: booting"));
   delay(POWER_SETTLE_MS);
-  if (runStateSurvived()) {
-    runState.resets++;
-    saveRunState();
-    Serial.print(F("Restarted after a reset (#"));
-    Serial.print(runState.resets);
-    Serial.println(F("): handled IR points stay skipped"));
+  if (runStateSurvived() && runState.towInProgress) {
+    // A reset hit in the middle of the tow: finish it safely and don't tow again this run.
+    Serial.println(F("A reset interrupted the tow: lifting it, tow point skipped this run"));
     for (uint8_t i = 0; i < 3; i++) {
       digitalWrite(LED, HIGH);
       delay(150);
@@ -442,20 +455,18 @@ void setup() {
       delay(150);
     }
     if (runState.towIsDown) {
-      Serial.println(F("The reset caught the tow down, lifting it"));
       towUp();
       delay(500);
     }
-  } else {
-    // Power-up: start a fresh run.
-    memset(&runState, 0, sizeof(runState));
-    runState.magic = RUN_MAGIC;
-    saveRunState();
-    if (TOW_LIFT_AT_BOOT) {
-      towUp();
-      delay(500);
-    }
+    markerRecorded[(uint8_t)TOW_MARKER] = true;
+  } else if (TOW_LIFT_AT_BOOT) {
+    towUp();
+    delay(500);
   }
+  // Fresh tow state for this run.
+  memset(&runState, 0, sizeof(runState));
+  runState.magic = RUN_MAGIC;
+  saveRunState();
   Serial.println(F("Starting platform (radar homes to its start angle)"));
   d9.begin();
   delay(500);

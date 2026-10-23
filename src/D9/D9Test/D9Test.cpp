@@ -701,7 +701,7 @@ D9Test::Result D9Test::followLine(uint8_t flags, uint8_t targetMarker) {
     }
 }
 
-// Sweeps the scanner and watches the LDR like D9Platform::findEnemy(), logging as it goes.
+// Sweeps the scanner until the LDR sees the laser, logging as it goes.
 D9Test::Result D9Test::scanForThreat(bool report) {
     ServoScanner& scanner = d9.getServoScanner();
     EnemyDetector& detector = d9.getEnemyDetector();
@@ -1093,23 +1093,20 @@ void D9Test::testServoAngle() {
     }
 }
 
-// Calls d9.tow() (scanner servo to 90 deg) and holds until you release it.
+// Lowers the tow hook, holds it down until you press Enter, then lifts it.
 void D9Test::testTow() {
-    printHeader(F("TOW"));
-    if (!ensureServo()) {
-        return;
-    }
+    printHeader(F("TOW HOOK"));
     startTest();
-    d9.tow();
-    Serial.println(F("Holding, Enter releases"));
+    d9.getTowHook().lower();
+    Serial.println(F("Hook down, Enter lifts it"));
     while (!stopRequested()) {
     }
-    d9.getServoScanner().moveToAngle(0);
+    d9.getTowHook().lift();
 }
 
 // Threat detection combo: scanner sweep + LDR, optionally reporting THREAT to the tank over LoRa.
 void D9Test::comboThreat() {
-    printHeader(F("THREAT DETECTION (findEnemy loop, darkest = lowest ldr @ angle)"));
+    printHeader(F("THREAT DETECTION (darkest = lowest ldr @ angle)"));
     bool report = askYesNo(F("Send THREAT to TNK"), false);
     while (true) {
         startTest();
@@ -1174,18 +1171,17 @@ void D9Test::comboMission() {
         logBegin(F("STEP"));
         if (route[i] == SCAN_STEP) {
             Serial.println(F(" scan"));
-            // Like findEnemy(), a scan that finds nothing in time lets the route continue.
+            // A scan that finds nothing in time lets the route continue.
             result = scanForThreat(reports);
             if (result == TIMED_OUT) {
                 result = DONE;
             }
         } else if (route[i] == TOW_STEP) {
-            Serial.println(F(" tow"));
-            if (ensureServo()) {
-                d9.tow();
-            } else {
-                result = NOT_RUN;
-            }
+            // Hook only: the mission's tow also reverses the tracks, which a dry run mustn't do.
+            Serial.println(F(" tow hook"));
+            d9.getTowHook().lower();
+            delay(1000);
+            d9.getTowHook().lift();
         } else {
             logField(F("toMarker"), route[i]);
             Serial.println();

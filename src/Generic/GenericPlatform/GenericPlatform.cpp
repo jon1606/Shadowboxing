@@ -60,7 +60,8 @@ GenericPlatform::GenericPlatform(
     sonic(trig, echo),
     irReceiver(ir),
     distanceTravelled(0.0f),
-    stop(false) {}
+    stop(false),
+    tracksStopped(true) {}
 
 // Initializes every hardware subsystem used by the platform.
 void GenericPlatform::begin() {
@@ -98,12 +99,17 @@ float GenericPlatform::updateDrive() {
   lastLoopTime = currentTime;
 
   int sensors = lineFollower.update();
-  if (sensors == 2) {
+  if (sensors == 2 && !tracksStopped) {
+    // Line lost while moving: keep the last command.
     return distanceTravelled;
+  }
+  // Line lost right after a stop (e.g. on a marker's strip): drive straight instead of staying stopped.
+  if (sensors == 2) {
+    sensors = 0;
   }
   // Pause while something is too close; driving resumes on a later call once it's clear.
   if (checkSonicDistance() < OBSTACLE_CM) {
-    driveSystem.stop();
+    stopDrive();
     return distanceTravelled;
   }
 
@@ -125,6 +131,7 @@ float GenericPlatform::updateDrive() {
   distanceTravelled += (vL + vR) * 0.5f * dt;
 
   driveSystem.drive(leftPWM, rightPWM);
+  tracksStopped = false;
   return distanceTravelled;
 }
 
@@ -176,6 +183,7 @@ int8_t GenericPlatform::updateIRReceiver() {
 // Immediately stops both drive motors.
 void GenericPlatform::stopDrive() {
   driveSystem.stop();
+  tracksStopped = true;
 }
 
 // Returns the platform's current estimated travelled distance.

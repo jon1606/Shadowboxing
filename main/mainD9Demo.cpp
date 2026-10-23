@@ -2,26 +2,35 @@
 // Copy this file over src/main.cpp, upload, unplug USB and run it on the battery.
 //
 // Scenario:
-//   1. Power on: 1 s for the power to settle, then a 5 s countdown. Every run ends with the tow
-//      lifted, so it starts lifted (set TOW_LIFT_AT_BOOT to also lift it at power-on).
+//   1. Power on: 1 s for the power to settle, then a 5 s countdown. The tow is lifted at the end of
+//      every tow, so it starts lifted (set TOW_LIFT_AT_BOOT to also lift it at power-on).
 //   2. Follow the line with the radar sweeping 50-245 deg. Whenever the laser hits the LDR, stop,
 //      point the radar at it for THREAT_HOLD_MS and broadcast THREAT to ALL over LoRa (no waiting),
 //      then keep going. It never stops for a lost line.
-//   3. At IR marker 13: stop, lower the tow, drive backwards for REVERSE_MS, stop, lift the tow.
-//      That ends the scenario; everything stays stopped until reset.
+//   3. At each IR point (any code; 12 is ignored everywhere): stop and sweep the radar
+//      MARKER_SWEEPS full passes, then drive on. Each IR code is handled only the first time it is
+//      read; after that it is ignored for the rest of the run.
+//   4. At the tow point (TOW_MARKER): stop, lower the tow, drive backwards for REVERSE_MS, stop,
+//      lift the tow, then follow the line again.
+//
+// The run's memory (IR points already handled, whether the tow is down) survives a reset that isn't
+// a power cut, e.g. a battery dip while reversing with the load. After such a reset the LED flashes
+// 3 times, handled IR points stay skipped (so the tow doesn't repeat) and a tow caught down is lifted.
+// To start a fresh run, unplug the battery for a few seconds (the reset button keeps the memory).
 //
 // Reversing retraces the path: while following the line, the D9 records its track speeds every
-// RECORD_MS for the last REVERSE_MS; at marker 13 it plays them back newest first with both tracks
+// RECORD_MS for the last REVERSE_MS; at the tow point it plays them back newest first with both tracks
 // reversed, which drives the same curves backwards. The line sensors sit at the front, so steering
 // by them in reverse is unstable on its own; REVERSE_TRIM_PWM (0 = off) adds a gentle correction
 // on top of the replay.
 //
 // Board LED (D13):
+//   3 quick flashes   = it restarted after a reset (not a power cut)
 //   slow blink (1 s)  = start countdown, put the D9 on the line
 //   on                = following the line (radar sweeping)
+//   blink (0.5 s)     = stopped at an IR point, sweeping
 //   off               = threat found, the radar points at it
-//   blink (0.5 s)     = towing
-//   fast blink        = scenario finished
+//   fast blink        = towing
 // With USB plugged in, the Serial Monitor (9600) logs every step.
 #include "Generic/GenericPlatform/GenericPlatform.h"
 #include <Arduino.h>
@@ -66,18 +75,27 @@ const uint8_t LED = LED_BUILTIN;
 
 // Value updateIRReceiver() returns when no marker was seen.
 const int8_t NO_MARKER = 100;
-const int8_t TOW_MARKER = 13;
-const unsigned long MARKER_CONFIRM_MS = 300;    // the marker must show up twice within this
+const int8_t TOW_MARKER = 16;
+const unsigned long MARKER_CONFIRM_MS = 300;    // a code must show up twice within this to count
+const uint8_t MARKER_SWEEPS = 2;                // full radar passes at each IR point
+
+// Radar sweep limits, as set in D9.cpp.
+const uint8_t RADAR_MIN = 50;
+const uint8_t RADAR_MAX = 245;
 const uint8_t THREAT_CONFIRM_READS = 3;         // LDR readings in a row under the threshold
 
 // Line following, same speeds as GenericPlatform.cpp.
 const int BASE_PWM = 200;
 const int TURN_PWM = 0;                         // inner track once a correction lasts (hard turn)
+const int TURN_OUTER_PWM = 255;                 // outer track in a hard turn: skidding round a stopped
+                                                // track needs force, at 200 it stalled mid-turn
 const int SOFT_TURN_PWM = 120;                  // inner track at the start of a correction (gentle turn)
 const unsigned long SOFT_TURN_MS = 150;         // how long a correction stays gentle (0 = always hard)
 const unsigned long CURVE_MS = 120;             // a correction this long counts as a curve
 const unsigned long TURN_HOLD_MS = 0;           // keep turning this long after a curve's line slips away (0 = off; 1500 overshot on straights)
 
+const int KICK_PWM = 255;                       // short full-power push when starting from a stop
+const unsigned long KICK_MS = 200;              // (0 = no kick)
 const unsigned long POWER_SETTLE_MS = 1000;     // let the battery connection settle before anything moves
 const unsigned long START_DELAY_MS = 5000;
 // Lifting the tow at power-on pushes it against its top stop. With the tow servo powered from the
@@ -92,7 +110,7 @@ const unsigned long RECORD_MS = 50;             // how often the track speeds ar
 const uint8_t RECORD_SIZE = REVERSE_MS / RECORD_MS;
 const int REVERSE_TRIM_PWM = 0;                 // sensor correction while reversing (0 = off, try 30-60)
 
-enum Phase { DRIVING, THREAT, FINISHED };
+enum Phase { DRIVING, MARKER_SCAN, THREAT };
 
 Phase phase = DRIVING;
 unsigned long phaseStart = 0;
@@ -104,7 +122,39 @@ uint8_t laserReads = 0;          // readings in a row under the threshold
 unsigned long laserClearSince = 0;
 int8_t markerCandidate = NO_MARKER;
 unsigned long markerCandidateAt = 0;
+uint8_t sweepsDone = 0;
+uint8_t lastEnd = RADAR_MIN;     // which end of the sweep the radar touched last
 uint16_t threats = 0;
+
+// Run memory kept in .noinit RAM: a reset leaves it alone, only a power cut loses it. The magic number
+// and checksum tell a real saved state from the random contents RAM has after power-on.
+struct RunState {
+  uint32_t magic;
+  uint8_t handled[32];   // one bit per IR code (0-255) already handled this run
+  bool towIsDown;
+  uint8_t resets;        // resets since the run started
+  uint8_t check;
+};
+const uint32_t RUN_MAGIC = 0xD9C0FFEEUL;
+RunState runState __attribute__((section(".noinit")));
+
+uint8_t runStateCheck() {
+  uint8_t sum = 0x5A;
+  const uint8_t* bytes = (const uint8_t*)&runState;
+  for (uint8_t i = 0; i < sizeof(RunState) - 1; i++) {
+    sum = (sum << 1 | sum >> 7) ^ bytes[i];
+  }
+  return sum;
+}
+
+void saveRunState() {
+  runState.check = runStateCheck();
+}
+
+// True if RAM still holds this run's memory, i.e. the board was reset without a power cut.
+bool runStateSurvived() {
+  return runState.magic == RUN_MAGIC && runState.check == runStateCheck();
+}
 
 // Track speeds of the last REVERSE_MS of driving, oldest overwritten first.
 uint8_t recordLeft[RECORD_SIZE];
@@ -142,11 +192,15 @@ void towUp() {
   logTime();
   Serial.println(F("Tow up"));
   turnTow(TOW_SPEED_US, TOW_UP_MS);
+  runState.towIsDown = false;
+  saveRunState();
 }
 
 void towDown() {
   logTime();
   Serial.println(F("Tow down"));
+  runState.towIsDown = true;
+  saveRunState();
   turnTow(-TOW_SPEED_US, TOW_DOWN_MS);
 }
 
@@ -199,11 +253,13 @@ void followLine() {
   // Neither sensor dark: keep the last command, as updateDrive() does.
 
   // Small drifts get a gentle correction; one that lasts (a real curve) turns hard.
-  int inner = now - correctionStart < SOFT_TURN_MS ? SOFT_TURN_PWM : TURN_PWM;
+  bool hard = now - correctionStart >= SOFT_TURN_MS;
+  int inner = hard ? TURN_PWM : SOFT_TURN_PWM;
+  int outer = hard ? TURN_OUTER_PWM : BASE_PWM;
   if (turnDirection > 0) {
-    driveForward(BASE_PWM, inner);
+    driveForward(outer, inner);
   } else if (turnDirection < 0) {
-    driveForward(inner, BASE_PWM);
+    driveForward(inner, outer);
   } else {
     driveForward(BASE_PWM, BASE_PWM);
   }
@@ -225,24 +281,53 @@ bool laserHit() {
   return laserReads >= THREAT_CONFIRM_READS;
 }
 
-// True once the tow marker has been seen twice within MARKER_CONFIRM_MS; other codes are ignored.
-bool towMarkerSeen() {
+// Returns an IR code the first time it is read (seen twice within MARKER_CONFIRM_MS, to filter
+// noise); a code that was already handled this run returns NO_MARKER.
+int8_t newMarker() {
   int8_t code = basePlatform.updateIRReceiver();
-  if (code != TOW_MARKER) {
-    return false;
+  if (code == NO_MARKER) {
+    return NO_MARKER;
+  }
+  uint8_t index = (uint8_t)code;
+  if (runState.handled[index / 8] & (1 << (index % 8))) {
+    return NO_MARKER;
   }
   unsigned long now = millis();
-  if (code == markerCandidate && now - markerCandidateAt <= MARKER_CONFIRM_MS) {
-    return true;
+  if (code != markerCandidate || now - markerCandidateAt > MARKER_CONFIRM_MS) {
+    markerCandidate = code;
+    markerCandidateAt = now;
+    return NO_MARKER;
   }
-  markerCandidate = code;
-  markerCandidateAt = now;
-  return false;
+  markerCandidate = NO_MARKER;
+  runState.handled[index / 8] |= 1 << (index % 8);
+  saveRunState();
+  return code;
+}
+
+// Restarts the radar sweep from its start angle and starts counting full passes again.
+void restartRadar() {
+  d9.getServoScanner().begin();
+  sweepsDone = 0;
+  lastEnd = RADAR_MIN;
+}
+
+// Steps the radar and counts a pass each time it reaches the opposite end.
+void sweepRadar() {
+  ServoScanner& radar = d9.getServoScanner();
+  radar.update();
+  uint8_t angle = radar.getAngle();
+  if ((angle >= RADAR_MAX && lastEnd == RADAR_MIN) || (angle <= RADAR_MIN && lastEnd == RADAR_MAX)) {
+    lastEnd = angle >= RADAR_MAX ? RADAR_MAX : RADAR_MIN;
+    sweepsDone++;
+  }
 }
 
 void startDriving() {
-  // begin() restarts the radar sweep from 0 deg.
-  d9.getServoScanner().begin();
+  restartRadar();
+  // From standstill the tracks may not have the force to break free (especially in a pivot),
+  // so start with a short straight kick at full power.
+  tracks.drive(KICK_PWM, KICK_PWM);
+  delay(KICK_MS);
   // Time spent stopped isn't part of the path, so recording restarts from now.
   lastRecord = millis();
   logTime();
@@ -301,27 +386,41 @@ void reverseAlongPath() {
     tracks.drive(-left, -right);
     unsigned long stepStart = millis();
     while (millis() - stepStart < RECORD_MS) {
-      digitalWrite(LED, (millis() / 250) % 2);
+      digitalWrite(LED, (millis() / 100) % 2);
     }
   }
   tracks.stop();
 }
 
-// Marker 13: lower the tow, drive backwards with it, stop, lift it. Ends the scenario.
-void runTow() {
+// IR point: stop and sweep the radar MARKER_SWEEPS passes before driving on.
+void startMarkerScan(int8_t marker) {
+  tracks.stop();
+  restartRadar();
+  logTime();
+  Serial.print(F("IR point "));
+  Serial.print((uint8_t)marker);
+  Serial.println(F(": stopped to scan"));
+  enterPhase(MARKER_SCAN);
+}
+
+// Tow point: lower the tow, drive backwards with it, stop, lift it, then drive on.
+void runTow(int8_t marker) {
   tracks.stop();
   d9.getServoScanner().stop();
   digitalWrite(LED, HIGH);
   logTime();
-  Serial.println(F("IR marker 13: towing"));
+  Serial.print(F("IR point "));
+  Serial.print((uint8_t)marker);
+  Serial.println(F(": towing"));
   towDown();
   delay(500);
   reverseAlongPath();
   delay(300);
   towUp();
-  logTime();
-  Serial.println(F("Scenario finished"));
-  enterPhase(FINISHED);
+  // The recorded path was used up driving back.
+  recordHead = 0;
+  recordCount = 0;
+  startDriving();
 }
 
 void setup() {
@@ -330,9 +429,32 @@ void setup() {
   tracks.begin();
   Serial.println(F("D9 field demo: booting"));
   delay(POWER_SETTLE_MS);
-  if (TOW_LIFT_AT_BOOT) {
-    towUp();
-    delay(500);
+  if (runStateSurvived()) {
+    runState.resets++;
+    saveRunState();
+    Serial.print(F("Restarted after a reset (#"));
+    Serial.print(runState.resets);
+    Serial.println(F("): handled IR points stay skipped"));
+    for (uint8_t i = 0; i < 3; i++) {
+      digitalWrite(LED, HIGH);
+      delay(150);
+      digitalWrite(LED, LOW);
+      delay(150);
+    }
+    if (runState.towIsDown) {
+      Serial.println(F("The reset caught the tow down, lifting it"));
+      towUp();
+      delay(500);
+    }
+  } else {
+    // Power-up: start a fresh run.
+    memset(&runState, 0, sizeof(runState));
+    runState.magic = RUN_MAGIC;
+    saveRunState();
+    if (TOW_LIFT_AT_BOOT) {
+      towUp();
+      delay(500);
+    }
   }
   Serial.println(F("Starting platform (radar homes to its start angle)"));
   d9.begin();
@@ -355,15 +477,28 @@ void loop() {
     d9.getServoScanner().update();
     if (laserHit()) {
       threatFound();
-    } else if (towMarkerSeen()) {
-      runTow();
+      return;
     }
-  } else if (phase == THREAT) {
+    int8_t marker = newMarker();
+    if (marker == TOW_MARKER) {
+      runTow(marker);
+    } else if (marker != NO_MARKER) {
+      startMarkerScan(marker);
+    }
+  } else if (phase == MARKER_SCAN) {
+    digitalWrite(LED, (now / 250) % 2);
+    sweepRadar();
+    if (laserHit()) {
+      threatFound();
+    } else if (sweepsDone >= MARKER_SWEEPS) {
+      logTime();
+      Serial.println(F("No threat here, driving on"));
+      startDriving();
+    }
+  } else {
     digitalWrite(LED, LOW);
     if (now - phaseStart >= THREAT_HOLD_MS) {
       startDriving();
     }
-  } else {
-    digitalWrite(LED, (now / 100) % 2);
   }
 }

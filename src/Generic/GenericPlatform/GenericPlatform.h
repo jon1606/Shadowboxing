@@ -21,6 +21,7 @@ private:
   IRReceiver irReceiver;
   float distanceTravelled;
   bool stop;
+  bool tracksStopped;
 
 public:
   GenericPlatform(
